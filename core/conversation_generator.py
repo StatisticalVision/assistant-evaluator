@@ -11,7 +11,7 @@ from models.data_models import Behavior, Persona, KnowledgeBase, Conversation, G
 logger = logging.getLogger(__name__)
 
 CANNOT_HELP_ANSWER = "I'm sorry a human operator will need to help you with this"
-FILE_OUTPUT_NAME = "generate_conversations.csv"
+FILE_OUTPUT_NAME = "output/generate_conversations.csv"
 
 
 class ConversationGenerator:
@@ -159,7 +159,7 @@ class ConversationGenerator:
                     )
                     continue
 
-        export_conversations_to_csv(conversations, "generate_conversations.csv")
+        export_conversations_to_csv(conversations, FILE_OUTPUT_NAME)
 
         logger.info(
             f"Generated {len(conversations)} valid questions and saved to {output_file}"
