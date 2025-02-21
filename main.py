@@ -13,7 +13,6 @@ from core.conversation_generator import ConversationGenerator
 from core.report_generator import ReportGenerator
 from core.conversation_evaluator import ConversationEvaluator
 from core.empathy_evaluator import EmpathyEvaluator
-from core.knowledge_base_agent import KnowledgeBaseAgent
 from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO)
@@ -25,10 +24,6 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # In main.py
 empathy_evaluator = EmpathyEvaluator(OPENAI_API_KEY)
-kb_agent = KnowledgeBaseAgent(api_key=OPENAI_API_KEY, kb_file=Path("data/kb.json"))
-
-# You can now use the kb_agent to query the knowledge base:
-response = kb_agent.get_response("How do I handle angry customers?")
 
 
 def main():
