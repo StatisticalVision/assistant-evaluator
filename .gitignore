@@ -13,6 +13,9 @@ __pycache__/
 # logs
 logs/
 
+#ds_store
+.ds_store
+
 # C extensions
 *.so
 
