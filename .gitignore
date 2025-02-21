@@ -10,8 +10,10 @@ __pycache__/
 # notes
 .notes
 
-# logs
+# extraneous folders to not include
 logs/
+output/
+extra/
 
 #ds_store
 .ds_store
