@@ -1,12 +1,9 @@
-from dataclasses import dataclass
-from typing import List, Dict, Optional
-import json
 import yaml
 from pathlib import Path
 import logging
 import os
 from datetime import datetime
-from models.data_models import Conversation, Persona, KnowledgeBase
+from models.data_models import KnowledgeBase
 from core.persona_manager import PersonaManager
 from core.assistant_interface import AssistantInterface
 from core.conversation_generator import ConversationGenerator
