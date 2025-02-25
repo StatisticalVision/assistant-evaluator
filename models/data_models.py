@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from typing import List, Dict, Optional
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 import pandas as pd
 import logging
@@ -25,7 +25,15 @@ class Behavior:
 class Grade:
     empathy: float = -1.0
     accuracy: float = -1.0
+    # Avg
     response_time: float = -1.0
+
+
+@dataclass
+class ConversationTurn:
+    user_message: str
+    ai_response: str
+    timestamp: float = 0.0
 
 
 @dataclass
@@ -33,10 +41,47 @@ class Conversation:
     id: str
     persona: Persona
     behavior: Behavior
+    # The initial question that starts the conversation
     question: str
+    # The expected output for the entire conversation (could be a specific piece of information or goal)
     expected_outputs: str
-    actual_outputs: str
+    # A list of conversation turns (user message, ai response pairs)
+    conversation_turns: List[ConversationTurn] = field(default_factory=list)
     grade: Optional[Grade] = None
+
+    def add_turn(
+        self, user_message: str, ai_response: str, timestamp: float = 0.0
+    ) -> None:
+        """Add a new turn to the conversation"""
+        turn = ConversationTurn(
+            user_message=user_message, ai_response=ai_response, timestamp=timestamp
+        )
+        self.conversation_turns.append(turn)
+
+    @property
+    def actual_outputs(self) -> str:
+        """Get the entire conversation as a formatted string - for backward compatibility"""
+        if not self.conversation_turns:
+            return ""
+
+        conversation_text = ""
+        for i, turn in enumerate(self.conversation_turns):
+            conversation_text += f"User: {turn.user_message}\n"
+            conversation_text += f"Assistant: {turn.ai_response}\n\n"
+
+        return conversation_text.strip()
+
+    @property
+    def turns_count(self) -> int:
+        """Get the number of turns in the conversation"""
+        return len(self.conversation_turns)
+
+    @property
+    def last_ai_response(self) -> str:
+        """Get the last AI response"""
+        if not self.conversation_turns:
+            return ""
+        return self.conversation_turns[-1].ai_response
 
     @classmethod
     def from_csv_row(cls, row: pd.Series) -> Optional["Conversation"]:
@@ -80,9 +125,27 @@ class Conversation:
                 behavior=behavior,
                 question=row["question"],
                 expected_outputs=row["expected_outputs"],
-                actual_outputs=row["actual_outputs"],
+                conversation_turns=[],  # Initialize with empty turns
                 grade=grade,
             )
+
+            # If there's actual_outputs in the CSV, parse it into conversation turns
+            if row.get("actual_outputs") and row["actual_outputs"]:
+                try:
+                    # Try to parse the actual_outputs as a conversation
+                    conversation_text = row["actual_outputs"]
+                    # Simple parsing logic - can be improved based on your format
+                    # This assumes "User:" and "Assistant:" prefixes
+                    parts = conversation_text.split("User: ")
+                    for part in parts[1:]:  # Skip the first empty part
+                        if "Assistant: " in part:
+                            user_msg, ai_part = part.split("Assistant: ", 1)
+                            ai_msg = ai_part.split("User: ")[0].strip()
+                            conversation.add_turn(user_msg.strip(), ai_msg)
+                except Exception as e:
+                    # If parsing fails, add it as a single turn with the question
+                    logger.warning(f"Failed to parse conversation: {e}")
+                    conversation.add_turn(row["question"], row["actual_outputs"])
 
             # Validate the conversation
             if conversation.validate():
