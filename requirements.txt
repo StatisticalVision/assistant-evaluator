@@ -16,3 +16,5 @@ openai
 pytest
 PyYAML
 pytest
+boto3
+websockets
