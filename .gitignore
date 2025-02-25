@@ -14,6 +14,7 @@ __pycache__/
 logs/
 output/
 extra/
+reports/
 
 #ds_store
 .ds_store
