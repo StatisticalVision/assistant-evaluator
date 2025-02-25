@@ -10,7 +10,14 @@ from datetime import datetime
 from dotenv import load_dotenv
 from pathlib import Path
 from tqdm import tqdm
-from models.data_models import Behavior, Persona, KnowledgeBase, Conversation, Grade
+from models.data_models import (
+    Behavior,
+    Persona,
+    KnowledgeBase,
+    Conversation,
+    Grade,
+    ConversationTurn,
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -59,51 +66,127 @@ FIELDNAMES = [
     "question",
     "expected_outputs",
     "actual_outputs",
+    "turns_count",
     "empathy",
     "accuracy",
     "response_time",
 ]
 
 
-async def process_test_file(input_file, output_file):
-    """Process the test file and generate the outputs"""
-    # # Read test cases
+def export_conversations_to_csv(conversations, output_file):
+    """Export conversations to CSV with multi-turn data"""
+    with open(output_file, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+        writer.writeheader()
+
+        for conv in conversations:
+            writer.writerow(
+                {
+                    "conversation_id": conv.id,
+                    "persona_name": conv.persona.name,
+                    "persona_traits": ", ".join(conv.persona.traits),
+                    "behavior_name": conv.behavior.name,
+                    "behavior_characteristics": ", ".join(
+                        conv.behavior.characteristics
+                    ),
+                    "question": conv.question,
+                    "expected_outputs": conv.expected_outputs,
+                    "actual_outputs": conv.actual_outputs,
+                    "turns_count": len(conv.conversation_turns),
+                    "empathy": conv.grade.empathy if conv.grade else -1,
+                    "accuracy": conv.grade.accuracy if conv.grade else -1,
+                    "response_time": conv.grade.response_time if conv.grade else -1,
+                }
+            )
+
+
+async def process_test_file(input_file, output_file, max_turns=3):
+    """Process the test file and generate multi-turn conversation outputs"""
+    """Process the test file and generate the outputs for multi-turn conversations"""
+    # Read test cases
     test_cases = Conversation.load_from_csv(input_file)
+
     # Process each test case
     results = []
     for test_case in tqdm(test_cases, desc="Processing test cases"):
         # Create persona context from the test case
-        persona_context = (
-            f"Persona: {test_case.persona}\nTraits: {test_case.persona.traits}\n"
+        persona_context = f"Persona: {test_case.persona.name}\nTraits: {', '.join(test_case.persona.traits)}\n"
+        persona_context += (
+            f"Behavior: {test_case.behavior.name}\n"
+            f"Characteristics: {', '.join(test_case.behavior.characteristics)}"
         )
-        persona_context += f"Behavior: {test_case.behavior}\nCharacteristics: {test_case.behavior.characteristics}"
 
         # Run the conversation
         start_time = time.time()
-        actual_output = await run_single_test(
-            persona_context=persona_context, question=test_case.question
+
+        # Initialize with the first question
+        initial_question = test_case.question
+
+        # Create a copy of the test case to store results
+        result = Conversation(
+            id=test_case.id,
+            persona=test_case.persona,
+            behavior=test_case.behavior,
+            question=initial_question,
+            expected_outputs=test_case.expected_outputs,
+            conversation_turns=[],
+            grade=Grade(),
         )
 
+        # Connect to the AI service
+        async with websockets.connect(
+            f"wss://api.openai.com/v1/realtime?model={MODEL}",
+            extra_headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "OpenAI-Beta": "realtime=v1",
+            },
+        ) as openai_ws:
+            # Initialize session
+            await initialize_session(openai_ws, persona_context)
+
+            # Start with the initial question
+            current_question = initial_question
+
+            # Conduct the conversation for multiple turns
+            for turn_index in range(max_turns):
+                # Send the current question
+                await send_user_message(openai_ws, current_question)
+
+                # Get AI response
+                ai_response = await collect_assistant_response(openai_ws)
+
+                # Add the turn to our conversation result
+                result.add_turn(current_question, ai_response, time.time())
+
+                # If we've reached the last turn, break
+                if turn_index == max_turns - 1:
+                    break
+
+                # Otherwise, generate a follow-up question based on the AI's response
+                follow_up_question = await generate_follow_up_question(
+                    openai_ws,
+                    persona_context,
+                    initial_question,
+                    current_question,
+                    ai_response,
+                    turn_index,
+                )
+
+                # Update the current question for the next turn
+                current_question = follow_up_question
+
+        # Calculate total response time
         end_time = time.time()
         response_time = round(end_time - start_time, 2)
 
-        # Copy the test case and add results
-        result = test_case.copy()
-        result.actual_output = actual_output
+        # Update the grade
         result.grade.response_time = response_time
 
-        # Placeholder for metrics that would be evaluated separately
-        # You would implement your own scoring methods for these
-        result["empathy"] = ""
-        result["accuracy"] = ""
-
+        # Add result to results list
         results.append(result)
 
     # Write results to output file
-    with open(output_file, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
-        writer.writeheader()
-        writer.writerows(results)
+    export_conversations_to_csv(results, output_file)
 
     logger.info(f"Results written to {output_file}")
     return results
@@ -292,3 +375,53 @@ async def main():
         output_file = args.output
 
     await process_test_file(input_file, output_file)
+
+
+async def generate_follow_up_question(
+    openai_ws,
+    persona_context,
+    initial_question,
+    current_question,
+    ai_response,
+    turn_index,
+):
+    """Generate a follow-up question based on the persona and the conversation so far"""
+
+    # Create a prompt for generating a follow-up question
+    follow_up_prompt = f"""
+    Based on the persona information provided and the conversation so far, generate a natural follow-up question that the user would ask.
+    
+    {persona_context}
+    
+    Initial question: {initial_question}
+    
+    Current conversation:
+    User: {current_question}
+    Assistant: {ai_response}
+    
+    Turn number: {turn_index + 1}
+    
+    Generate a single follow-up question that:
+    1. Feels natural based on the persona
+    2. Follows from the assistant's response
+    3. Could seek clarification, additional information, or express concerns based on the persona's behavior
+    
+    Return ONLY the follow-up question, with no additional text or explanation.
+    """
+
+    # Send the prompt to get a follow-up question
+    await send_user_message(openai_ws, follow_up_prompt)
+
+    # Collect the response with the follow-up question
+    response = await collect_assistant_response(openai_ws)
+
+    # Clean up the response to get just the question
+    # Remove any quotation marks, prefixes like "Follow-up:", etc.
+    follow_up = response.strip('" \n')
+
+    # Remove common prefixes if present
+    for prefix in ["Follow-up:", "User:", "Follow-up question:", "Question:"]:
+        if follow_up.startswith(prefix):
+            follow_up = follow_up[len(prefix) :].strip()
+
+    return follow_up
