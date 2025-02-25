@@ -44,14 +44,6 @@ kb_file = "data/kb.json"
 personas_file = "data/behaviorPersona.json"
 knowledge_base = KnowledgeBase(kb_file)
 
-
-faqs = {
-    "What are your business hours?": "Our business hours are Monday through Friday, 9 AM to 5 PM EST.",
-    "How do I reset my password?": "You can reset your password by clicking the 'Forgot Password' link on the login page.",
-    # Add more FAQs...
-}
-
-
 # Initialize generator
 generator = ConversationGenerator(api_key=OPENAI_API_KEY)
 manager = PersonaBehaviorManager(config_file=Path(personas_file))
@@ -67,5 +59,5 @@ generator.generate_questions(
     behaviors=manager.behaviors,
     questions_per_faq=3,
     out_of_scope_questions_per_persona=2,
-    output_file=Path("generated_conversations.csv"),
+    output_file=Path("generated_conversations2.csv"),
 )
