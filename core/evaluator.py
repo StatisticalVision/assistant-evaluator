@@ -1,15 +1,13 @@
-from typing import List
+from typing import List, Callable, Optional
 import pandas as pd
 from pathlib import Path
 import time
-import logging
-from llama_index.llms.openai import OpenAI
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from models.data_models import Conversation, Grade
-from typing import List
+from utils.logging_config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class ConversationEvaluator:
@@ -20,12 +18,36 @@ class ConversationEvaluator:
         model: str = "gpt-4",
         batch_size: int = 5,
     ):
+        """
+        Initialize the evaluator with conversations to evaluate
+
+        Args:
+            conversations: List of conversations to evaluate
+            api_key: OpenAI API key
+            model: Model to use for evaluation
+            batch_size: Batch size for parallel processing
+        """
+        from llama_index.llms.openai import OpenAI
+
         self.llm = OpenAI(model=model, api_key=api_key)
         self.conversations = conversations
         self.batch_size = batch_size
+        logger.info(
+            f"Initialized ConversationEvaluator with {len(conversations)} conversations using model {model}"
+        )
+        logger.debug(f"Using batch size {batch_size}")
 
     def evaluate_response(self, conv: Conversation) -> Conversation:
-        """Evaluate a full conversation for empathy and accuracy"""
+        """
+        Evaluate a full conversation for empathy and accuracy
+
+        Args:
+            conv: Conversation to evaluate
+
+        Returns:
+            The same conversation with updated grade
+        """
+        logger.debug(f"Evaluating conversation {conv.id}")
 
         system_prompt = """
         You are an expert conversation evaluator. Analyze the given customer service interaction
@@ -67,14 +89,32 @@ class ConversationEvaluator:
         """
 
         try:
+            logger.debug(f"Sending evaluation request for conversation {conv.id}")
             response = self.llm.complete(system_prompt + "\n\n" + evaluation_prompt)
-            result = json.loads(response.text)
 
-            conv.grade.empathy = result.get("empathy", -1)
-            conv.grade.accuracy = result.get("accuracy", -1)
-            return conv
+            try:
+                result = json.loads(response.text)
+
+                conv.grade.empathy = result.get("empathy", -1)
+                conv.grade.accuracy = result.get("accuracy", -1)
+
+                logger.debug(
+                    f"Conversation {conv.id} evaluated - Empathy: {conv.grade.empathy:.2f}, Accuracy: {conv.grade.accuracy:.2f}"
+                )
+                return conv
+            except json.JSONDecodeError:
+                logger.error(
+                    f"Failed to parse JSON response for conversation {conv.id}: {response.text[:100]}..."
+                )
+                conv.grade = Grade(
+                    empathy=-1,
+                    accuracy=-1,
+                    response_time=conv.grade.response_time if conv.grade else -1,
+                )
+                return conv
+
         except Exception as e:
-            logger.error(f"Error evaluating conversation: {str(e)}")
+            logger.error(f"Error evaluating conversation {conv.id}: {str(e)}")
             conv.grade = Grade(
                 empathy=-1,
                 accuracy=-1,
@@ -82,14 +122,28 @@ class ConversationEvaluator:
             )
             return conv
 
-    def process_conversations(self, output_path: Path, progress_callback=None) -> None:
-        """Process all conversations"""
+    def process_conversations(
+        self,
+        output_path: Path,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> None:
+        """
+        Process all conversations sequentially
+
+        Args:
+            output_path: Path to save results
+            progress_callback: Optional callback for progress reporting
+        """
         total_conversations = len(self.conversations)
-        logger.info(f"Processing {total_conversations} conversations")
+        logger.info(f"Processing {total_conversations} conversations sequentially")
 
         results = []
         for i, conversation in enumerate(self.conversations):
             start_time = time.time()
+
+            logger.debug(
+                f"Processing conversation {i+1}/{total_conversations}: ID {conversation.id}"
+            )
 
             # Ensure there's a Grade object
             if conversation.grade is None:
@@ -144,9 +198,15 @@ class ConversationEvaluator:
                         ),
                     }
                 )
+
+                logger.debug(
+                    f"Processed conversation {conversation.id} in {response_time:.2f}s"
+                )
+
             except Exception as e:
                 logger.error(
-                    f"Error processing conversation {conversation.id}: {str(e)}"
+                    f"Error processing conversation {conversation.id}: {str(e)}",
+                    exc_info=True,
                 )
                 results.append(
                     {
@@ -165,31 +225,42 @@ class ConversationEvaluator:
                 logger.info(f"Processed {i + 1}/{total_conversations} conversations")
 
         # Save results to CSV with progress
-        logger.info("Saving evaluation results to CSV...")
-        df = pd.DataFrame(results)
-        df.to_csv(output_path, index=False)
-        logger.info(f"Results saved to {output_path}")
+        self._save_results_to_csv(results, output_path)
 
     def process_conversations_parallel(
-        self, output_path: Path, max_workers: int = 3, progress_callback=None
+        self,
+        output_path: Path,
+        max_workers: int = 3,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> None:
-        """Process conversations in parallel with controlled concurrency"""
+        """
+        Process conversations in parallel with controlled concurrency
+
+        Args:
+            output_path: Path to save results
+            max_workers: Maximum number of parallel workers
+            progress_callback: Optional callback for progress reporting
+        """
         total_conversations = len(self.conversations)
         logger.info(
-            f"Processing {total_conversations} conversations with {max_workers} workers"
+            f"Processing {total_conversations} conversations with {max_workers} workers in parallel"
         )
 
         def process_conversation(conv):
+            """Worker function to process a single conversation"""
             start_time = time.time()
+            conv_id = conv.id
+
+            logger.debug(f"Worker processing conversation {conv_id}")
 
             # Ensure there's a Grade object
             if conv.grade is None:
                 conv.grade = Grade()
 
             if not conv.conversation_turns:
-                logger.warning(f"Skipping conversation {conv.id} - no turns")
+                logger.warning(f"Worker skipping conversation {conv_id} - no turns")
                 return {
-                    "conversation_id": conv.id,
+                    "conversation_id": conv_id,
                     "empathy": -1,
                     "accuracy": -1,
                     "response_time": -1,
@@ -206,6 +277,10 @@ class ConversationEvaluator:
                     evaluated_conv.grade = Grade(
                         empathy=-1, accuracy=-1, response_time=response_time
                     )
+
+                logger.debug(
+                    f"Worker completed conversation {conv_id} in {response_time:.2f}s"
+                )
 
                 return {
                     "conversation_id": evaluated_conv.id,
@@ -226,9 +301,12 @@ class ConversationEvaluator:
                     ),
                 }
             except Exception as e:
-                logger.error(f"Error processing conversation {conv.id}: {str(e)}")
+                logger.error(
+                    f"Worker error processing conversation {conv_id}: {str(e)}",
+                    exc_info=True,
+                )
                 return {
-                    "conversation_id": conv.id,
+                    "conversation_id": conv_id,
                     "empathy": -1,
                     "accuracy": -1,
                     "response_time": -1,
@@ -236,12 +314,18 @@ class ConversationEvaluator:
 
         completed = 0
         all_results = []
+
+        logger.debug(f"Starting ThreadPoolExecutor with {max_workers} workers")
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
             future_to_conv = {
                 executor.submit(process_conversation, conv): conv
                 for conv in self.conversations
             }
 
+            logger.debug(f"Submitted {len(future_to_conv)} tasks to worker pool")
+
+            # Process results as they complete
             for future in as_completed(future_to_conv):
                 try:
                     result = future.result()
@@ -259,13 +343,43 @@ class ConversationEvaluator:
                             f"Processed {completed}/{total_conversations} conversations"
                         )
                 except Exception as e:
-                    logger.error(f"Error getting future result: {str(e)}")
+                    logger.error(
+                        f"Error getting future result: {str(e)}", exc_info=True
+                    )
                     completed += 1
                     if progress_callback:
                         progress_callback(completed, total_conversations)
 
         # Save results to CSV
-        logger.info("Saving evaluation results to CSV...")
-        df = pd.DataFrame(all_results)
-        df.to_csv(output_path, index=False)
-        logger.info(f"Results saved to {output_path}")
+        self._save_results_to_csv(all_results, output_path)
+
+    def _save_results_to_csv(self, results: List[dict], output_path: Path) -> None:
+        """
+        Save evaluation results to CSV file
+
+        Args:
+            results: List of evaluation result dictionaries
+            output_path: Path to save the CSV file
+        """
+        logger.info(f"Saving {len(results)} evaluation results to {output_path}")
+
+        # Create parent directory if it doesn't exist
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            df = pd.DataFrame(results)
+            df.to_csv(output_path, index=False)
+
+            # Log some statistics about the results
+            valid_empathy = df[df["empathy"] >= 0]["empathy"]
+            valid_accuracy = df[df["accuracy"] >= 0]["accuracy"]
+
+            if not valid_empathy.empty:
+                logger.info(f"Average empathy score: {valid_empathy.mean():.2f}")
+            if not valid_accuracy.empty:
+                logger.info(f"Average accuracy score: {valid_accuracy.mean():.2f}")
+
+            logger.info(f"Results successfully saved to {output_path}")
+        except Exception as e:
+            logger.error(f"Error saving results to CSV: {str(e)}", exc_info=True)
+            raise
