@@ -2,11 +2,11 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 import pandas as pd
-import logging
 import json
+from utils.logging_config import get_logger
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Get a module-specific logger
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -98,7 +98,7 @@ class Conversation:
 
             if not persona or not behavior:
                 logger.error(
-                    f"Could not find persona or behavior for row {row['conversation_id']}"
+                    f"Could not find persona or behavior for conversation ID: {row['conversation_id']}"
                 )
                 return None
 
@@ -144,7 +144,9 @@ class Conversation:
                             conversation.add_turn(user_msg.strip(), ai_msg)
                 except Exception as e:
                     # If parsing fails, add it as a single turn with the question
-                    logger.warning(f"Failed to parse conversation: {e}")
+                    logger.warning(
+                        f"Failed to parse conversation ID {row['conversation_id']}: {e}"
+                    )
                     conversation.add_turn(row["question"], row["actual_outputs"])
 
             # Validate the conversation
@@ -152,16 +154,18 @@ class Conversation:
                 return conversation
             else:
                 logger.warning(
-                    f"Validation failed for conversation {row['conversation_id']}"
+                    f"Validation failed for conversation ID: {row['conversation_id']}"
                 )
                 return None
 
         except KeyError as e:
-            logger.error(f"Missing required field in row {row['conversation_id']}: {e}")
+            logger.error(
+                f"Missing required field in row ID {row['conversation_id']}: {e}"
+            )
             return None
         except Exception as e:
             logger.error(
-                f"Error creating conversation from row {row['conversation_id']}: {e}"
+                f"Error creating conversation from row ID {row['conversation_id']}: {e}"
             )
             return None
 
@@ -180,7 +184,9 @@ class Conversation:
                 if conversation:
                     conversations.append(conversation)
 
-            logger.info(f"Successfully loaded {len(conversations)} valid conversations")
+            logger.info(
+                f"Successfully loaded {len(conversations)} valid conversations out of {len(df)} total"
+            )
             return conversations
 
         except pd.errors.EmptyDataError:
@@ -190,16 +196,22 @@ class Conversation:
             logger.error(f"Error parsing CSV file: {csv_path}")
             return []
         except Exception as e:
-            logger.error(f"Error loading conversations: {e}")
+            logger.error(f"Error loading conversations from {csv_path}: {e}")
             return []
 
     def validate(self):
         # TODO with pydantic this goes inside dataclass
         # filter out short questions
         if len(self.question) < 10:
+            logger.debug(
+                f"Conversation {self.id} rejected: Question too short ({len(self.question)} chars)"
+            )
             return False
         # only use actual questions
         if "?" not in self.question:
+            logger.debug(
+                f"Conversation {self.id} rejected: Not a question (missing '?')"
+            )
             return False
         return True
 
@@ -207,8 +219,8 @@ class Conversation:
 @dataclass
 class KnowledgeBase:
     fname: Path
-    list_faqs: List[Dict[str, str]]
-    faqs: Dict[str, str]
+    list_faqs: List[Dict[str, str]] = field(default_factory=list)
+    faqs: Dict[str, str] = field(default_factory=dict)
 
     def __init__(self, fname: Path):
         self.fname = fname
@@ -222,16 +234,22 @@ class KnowledgeBase:
                 data = json.load(f)
                 self.list_faqs = data["faqs"]
                 self.faqs = self.load_faqs(self.list_faqs)
-            logger.info(f"Successfully loaded knowledge base from {kb_file}")
+            logger.info(
+                f"Successfully loaded knowledge base from {kb_file} with {len(self.faqs)} FAQs"
+            )
         except FileNotFoundError:
             logger.error(f"Knowledge base file not found: {kb_file}")
             raise
         except json.JSONDecodeError:
             logger.error(f"Invalid JSON in knowledge base file: {kb_file}")
             raise
+        except KeyError as e:
+            logger.error(f"Missing required key in knowledge base file {kb_file}: {e}")
+            raise
 
-    def load_faqs(self, faqs: List[Dict[str, str]]):
+    def load_faqs(self, faqs: List[Dict[str, str]]) -> Dict[str, str]:
         unified_faq = {}
         for faq in faqs:
             unified_faq.update(faq)
+        logger.debug(f"Loaded {len(unified_faq)} unique FAQ questions")
         return unified_faq
