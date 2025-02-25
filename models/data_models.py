@@ -47,7 +47,7 @@ class Conversation:
     expected_outputs: str
     # A list of conversation turns (user message, ai response pairs)
     conversation_turns: List[ConversationTurn] = field(default_factory=list)
-    grade: Optional[Grade] = None
+    grade: Optional[Grade] = field(default_factory=Grade)
 
     def add_turn(
         self, user_message: str, ai_response: str, timestamp: float = 0.0
