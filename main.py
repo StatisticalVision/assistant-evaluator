@@ -1,14 +1,12 @@
 import asyncio
 import os
 import argparse
-import random
-import logging
 from pathlib import Path
 from dotenv import load_dotenv
 from tqdm import tqdm
 from core.conversation_generator import ConversationGenerator
 from core.persona_manager import PersonaBehaviorManager
-from models.data_models import KnowledgeBase, Conversation
+from models.data_models import KnowledgeBase
 from core.evaluator import ConversationEvaluator
 from utils.logging_config import setup_logging
 

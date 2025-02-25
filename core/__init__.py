@@ -1,6 +1,5 @@
 from .persona_manager import PersonaBehaviorManager
 from .conversation_generator import ConversationGenerator
-from .assistant_interface import AssistantInterface
 from .evaluator import ConversationEvaluator
 from .report_generator import ReportGenerator
 
