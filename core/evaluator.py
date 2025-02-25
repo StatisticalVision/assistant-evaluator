@@ -25,157 +25,171 @@ class ConversationEvaluator:
         self.batch_size = batch_size
 
     def evaluate_response(self, conv: Conversation) -> Conversation:
-        """Evaluate a single response for empathy and accuracy"""
+        """Evaluate a full conversation for empathy and accuracy"""
 
         system_prompt = """
         You are an expert conversation evaluator. Analyze the given customer service interaction
         and provide scores for empathy and accuracy. Return your evaluation as a JSON object.
         
         Evaluate:
-        1. Empathy (0 or 1):
+        1. Empathy (0 to 1 scale):
            - Understanding of customer's situation
            - Appropriate tone and language
            - Expression of support/concern
+           - Consistency across multiple interactions
            
-        2. Accuracy (0-1):
+        2. Accuracy (0 to 1 scale):
            - Correctness of information
            - Completeness of response
            - Alignment with expected answer
+           - Consistency of information across turns
         
         Return dictionary format:
         {"empathy": float,"accuracy": float}
         """
 
+        # Format the full conversation
+        formatted_conversation = ""
+        for i, turn in enumerate(conv.conversation_turns):
+            formatted_conversation += f"Turn {i+1}:\n"
+            formatted_conversation += f"User: {turn.user_message}\n"
+            formatted_conversation += f"Assistant: {turn.ai_response}\n\n"
+
         evaluation_prompt = f"""
-        Customer Question: {conv.question}
-        Expected Response: {conv.expected_outputs}
-        Actual Response: {conv.actual_outputs}
+        Full Customer Conversation: 
+        {formatted_conversation}
         
-        Evaluate the actual response compared to the expected response.
+        Expected Response/Information: {conv.expected_outputs}
+        
+        Evaluate the entire conversation, considering all interactions between the user and assistant.
+        Focus on whether the assistant maintained empathy throughout the conversation and
+        provided accurate information that aligned with the expected response.
         """
+
         try:
             response = self.llm.complete(system_prompt + "\n\n" + evaluation_prompt)
             result = json.loads(response.text)
 
             conv.grade.empathy = result.get("empathy", -1)
-            conv.grade.empathy = result.get("accuracy", -1)
+            conv.grade.accuracy = result.get("accuracy", -1)
             return conv
         except Exception as e:
-            logger.error(f"Error evaluating response: {str(e)}")
-            return Grade(
-                empathy=-1, accuracy=-1, response_time=conv.grade.response_time
+            logger.error(f"Error evaluating conversation: {str(e)}")
+            conv.grade = Grade(
+                empathy=-1,
+                accuracy=-1,
+                response_time=conv.grade.response_time if conv.grade else -1,
             )
-            return {"empathy": -1, "accuracy": -1}
+            return conv
 
     def process_conversations(self, output_path: Path) -> None:
-        """Process all conversations in the CSV file"""
-        # Read CSV
-        df = pd.read_csv(csv_path)
-        total_rows = len(df)
-        logger.info(f"Processing {total_rows} conversations")
+        """Process all conversations"""
+        total_conversations = len(self.conversations)
+        logger.info(f"Processing {total_conversations} conversations")
 
-        def process_batch(batch_df: pd.DataFrame) -> List[Dict[str, Any]]:
-            results = []
-            for _, row in batch_df.iterrows():
-                start_time = time.time()
+        results = []
+        for i, conversation in enumerate(self.conversations):
+            start_time = time.time()
 
-                if pd.isna(row["actual_outputs"]) or row["actual_outputs"] == "":
-                    results.append(
-                        {
-                            "conversation_id": row["conversation_id"],
-                            "empathy": -1,
-                            "accuracy": -1,
-                            "response_time": -1,
-                        }
-                    )
-                    continue
-
-                evaluation = self.evaluate_response(
-                    row["question"], row["expected_outputs"], row["actual_outputs"]
-                )
-
-                response_time = time.time() - start_time
-
+            # Skip conversations with no turns
+            if not conversation.conversation_turns:
+                logger.warning(f"Skipping conversation {conversation.id} - no turns")
                 results.append(
                     {
-                        "conversation_id": row["conversation_id"],
-                        "empathy": evaluation.get("empathy", 0),
-                        "accuracy": evaluation.get("accuracy", 0),
-                        "response_time": response_time,
+                        "conversation_id": conversation.id,
+                        "empathy": -1,
+                        "accuracy": -1,
+                        "response_time": -1,
                     }
                 )
+                continue
 
-            return results
+            evaluated_conv = self.evaluate_response(conversation)
+            response_time = time.time() - start_time
 
-        # Process in batches
-        all_results = []
-        for i in range(0, total_rows, self.batch_size):
-            batch_df = df.iloc[i : i + self.batch_size]
-            batch_results = process_batch(batch_df)
-            all_results.extend(batch_results)
+            # Update response time
+            if evaluated_conv.grade:
+                evaluated_conv.grade.response_time = response_time
+            else:
+                evaluated_conv.grade = Grade(
+                    empathy=-1, accuracy=-1, response_time=response_time
+                )
 
-            # Log progress
-            logger.info(
-                f"Processed {min(i + self.batch_size, total_rows)}/{total_rows} conversations"
+            results.append(
+                {
+                    "conversation_id": conversation.id,
+                    "empathy": evaluated_conv.grade.empathy,
+                    "accuracy": evaluated_conv.grade.accuracy,
+                    "response_time": evaluated_conv.grade.response_time,
+                }
             )
 
-        # Update DataFrame with results
-        results_df = pd.DataFrame(all_results)
-        df = df.merge(results_df, on="conversation_id", how="left")
+            # Log progress periodically
+            if (i + 1) % 10 == 0 or i == total_conversations - 1:
+                logger.info(f"Processed {i + 1}/{total_conversations} conversations")
 
-        # Save updated CSV
+        # Save results to CSV
+        df = pd.DataFrame(results)
         df.to_csv(output_path, index=False)
         logger.info(f"Results saved to {output_path}")
 
     def process_conversations_parallel(
-        self, csv_path: Path, output_path: Path, max_workers: int = 3
+        self, output_path: Path, max_workers: int = 3
     ) -> None:
         """Process conversations in parallel with controlled concurrency"""
-        df = pd.read_csv(csv_path)
-        total_rows = len(df)
-        logger.info(f"Processing {total_rows} conversations with {max_workers} workers")
+        total_conversations = len(self.conversations)
+        logger.info(
+            f"Processing {total_conversations} conversations with {max_workers} workers"
+        )
 
-        def process_row(row):
+        def process_conversation(conv):
             start_time = time.time()
 
-            if pd.isna(row["actual_outputs"]) or row["actual_outputs"] == "":
+            if not conv.conversation_turns:
+                logger.warning(f"Skipping conversation {conv.id} - no turns")
                 return {
-                    "conversation_id": row["conversation_id"],
+                    "conversation_id": conv.id,
                     "empathy": -1,
                     "accuracy": -1,
                     "response_time": -1,
                 }
 
-            evaluation = self.evaluate_response(
-                row["question"], row["expected_outputs"], row["actual_outputs"]
-            )
-
+            evaluated_conv = self.evaluate_response(conv)
             response_time = time.time() - start_time
 
+            # Update response time
+            if evaluated_conv.grade:
+                evaluated_conv.grade.response_time = response_time
+            else:
+                evaluated_conv.grade = Grade(
+                    empathy=-1, accuracy=-1, response_time=response_time
+                )
+
             return {
-                "conversation_id": row["conversation_id"],
-                "empathy": evaluation.get("empathy", 0),
-                "accuracy": evaluation.get("accuracy", 0),
-                "response_time": response_time,
+                "conversation_id": evaluated_conv.id,
+                "empathy": evaluated_conv.grade.empathy,
+                "accuracy": evaluated_conv.grade.accuracy,
+                "response_time": evaluated_conv.grade.response_time,
             }
 
         all_results = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_row = {
-                executor.submit(process_row, row): row for _, row in df.iterrows()
+            future_to_conv = {
+                executor.submit(process_conversation, conv): conv
+                for conv in self.conversations
             }
 
-            for future in as_completed(future_to_row):
+            for i, future in enumerate(as_completed(future_to_conv)):
                 result = future.result()
                 all_results.append(result)
 
-                # Log progress
-                logger.info(f"Processed {len(all_results)}/{total_rows} conversations")
+                # Log progress periodically
+                if (i + 1) % 10 == 0 or i == total_conversations - 1:
+                    logger.info(
+                        f"Processed {i + 1}/{total_conversations} conversations"
+                    )
 
-        # Update DataFrame with results
-        results_df = pd.DataFrame(all_results)
-        df = df.merge(results_df, on="conversation_id", how="left")
-
-        # Save updated CSV
+        # Save results to CSV
+        df = pd.DataFrame(all_results)
         df.to_csv(output_path, index=False)
         logger.info(f"Results saved to {output_path}")
