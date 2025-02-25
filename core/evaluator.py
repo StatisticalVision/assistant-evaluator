@@ -82,7 +82,7 @@ class ConversationEvaluator:
             )
             return conv
 
-    def process_conversations(self, output_path: Path) -> None:
+    def process_conversations(self, output_path: Path, progress_callback=None) -> None:
         """Process all conversations"""
         total_conversations = len(self.conversations)
         logger.info(f"Processing {total_conversations} conversations")
@@ -90,6 +90,10 @@ class ConversationEvaluator:
         results = []
         for i, conversation in enumerate(self.conversations):
             start_time = time.time()
+
+            # Ensure there's a Grade object
+            if conversation.grade is None:
+                conversation.grade = Grade()
 
             # Skip conversations with no turns
             if not conversation.conversation_turns:
@@ -102,39 +106,72 @@ class ConversationEvaluator:
                         "response_time": -1,
                     }
                 )
+
+                # Update progress if callback provided
+                if progress_callback:
+                    progress_callback(i + 1, total_conversations)
                 continue
 
-            evaluated_conv = self.evaluate_response(conversation)
-            response_time = time.time() - start_time
+            try:
+                evaluated_conv = self.evaluate_response(conversation)
+                response_time = time.time() - start_time
 
-            # Update response time
-            if evaluated_conv.grade:
-                evaluated_conv.grade.response_time = response_time
-            else:
-                evaluated_conv.grade = Grade(
-                    empathy=-1, accuracy=-1, response_time=response_time
+                # Update response time
+                if evaluated_conv.grade:
+                    evaluated_conv.grade.response_time = response_time
+                else:
+                    evaluated_conv.grade = Grade(
+                        empathy=-1, accuracy=-1, response_time=response_time
+                    )
+
+                results.append(
+                    {
+                        "conversation_id": evaluated_conv.id,
+                        "empathy": (
+                            evaluated_conv.grade.empathy
+                            if hasattr(evaluated_conv.grade, "empathy")
+                            else -1
+                        ),
+                        "accuracy": (
+                            evaluated_conv.grade.accuracy
+                            if hasattr(evaluated_conv.grade, "accuracy")
+                            else -1
+                        ),
+                        "response_time": (
+                            evaluated_conv.grade.response_time
+                            if hasattr(evaluated_conv.grade, "response_time")
+                            else -1
+                        ),
+                    }
+                )
+            except Exception as e:
+                logger.error(
+                    f"Error processing conversation {conversation.id}: {str(e)}"
+                )
+                results.append(
+                    {
+                        "conversation_id": conversation.id,
+                        "empathy": -1,
+                        "accuracy": -1,
+                        "response_time": -1,
+                    }
                 )
 
-            results.append(
-                {
-                    "conversation_id": conversation.id,
-                    "empathy": evaluated_conv.grade.empathy,
-                    "accuracy": evaluated_conv.grade.accuracy,
-                    "response_time": evaluated_conv.grade.response_time,
-                }
-            )
-
-            # Log progress periodically
-            if (i + 1) % 10 == 0 or i == total_conversations - 1:
+            # Update progress if callback provided
+            if progress_callback:
+                progress_callback(i + 1, total_conversations)
+            # Log progress periodically (if no callback)
+            elif (i + 1) % 10 == 0 or i == total_conversations - 1:
                 logger.info(f"Processed {i + 1}/{total_conversations} conversations")
 
-        # Save results to CSV
+        # Save results to CSV with progress
+        logger.info("Saving evaluation results to CSV...")
         df = pd.DataFrame(results)
         df.to_csv(output_path, index=False)
         logger.info(f"Results saved to {output_path}")
 
     def process_conversations_parallel(
-        self, output_path: Path, max_workers: int = 3
+        self, output_path: Path, max_workers: int = 3, progress_callback=None
     ) -> None:
         """Process conversations in parallel with controlled concurrency"""
         total_conversations = len(self.conversations)
@@ -145,6 +182,10 @@ class ConversationEvaluator:
         def process_conversation(conv):
             start_time = time.time()
 
+            # Ensure there's a Grade object
+            if conv.grade is None:
+                conv.grade = Grade()
+
             if not conv.conversation_turns:
                 logger.warning(f"Skipping conversation {conv.id} - no turns")
                 return {
@@ -154,24 +195,46 @@ class ConversationEvaluator:
                     "response_time": -1,
                 }
 
-            evaluated_conv = self.evaluate_response(conv)
-            response_time = time.time() - start_time
+            try:
+                evaluated_conv = self.evaluate_response(conv)
+                response_time = time.time() - start_time
 
-            # Update response time
-            if evaluated_conv.grade:
-                evaluated_conv.grade.response_time = response_time
-            else:
-                evaluated_conv.grade = Grade(
-                    empathy=-1, accuracy=-1, response_time=response_time
-                )
+                # Update response time
+                if evaluated_conv.grade:
+                    evaluated_conv.grade.response_time = response_time
+                else:
+                    evaluated_conv.grade = Grade(
+                        empathy=-1, accuracy=-1, response_time=response_time
+                    )
 
-            return {
-                "conversation_id": evaluated_conv.id,
-                "empathy": evaluated_conv.grade.empathy,
-                "accuracy": evaluated_conv.grade.accuracy,
-                "response_time": evaluated_conv.grade.response_time,
-            }
+                return {
+                    "conversation_id": evaluated_conv.id,
+                    "empathy": (
+                        evaluated_conv.grade.empathy
+                        if hasattr(evaluated_conv.grade, "empathy")
+                        else -1
+                    ),
+                    "accuracy": (
+                        evaluated_conv.grade.accuracy
+                        if hasattr(evaluated_conv.grade, "accuracy")
+                        else -1
+                    ),
+                    "response_time": (
+                        evaluated_conv.grade.response_time
+                        if hasattr(evaluated_conv.grade, "response_time")
+                        else -1
+                    ),
+                }
+            except Exception as e:
+                logger.error(f"Error processing conversation {conv.id}: {str(e)}")
+                return {
+                    "conversation_id": conv.id,
+                    "empathy": -1,
+                    "accuracy": -1,
+                    "response_time": -1,
+                }
 
+        completed = 0
         all_results = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_conv = {
@@ -179,17 +242,30 @@ class ConversationEvaluator:
                 for conv in self.conversations
             }
 
-            for i, future in enumerate(as_completed(future_to_conv)):
-                result = future.result()
-                all_results.append(result)
+            for future in as_completed(future_to_conv):
+                try:
+                    result = future.result()
+                    all_results.append(result)
 
-                # Log progress periodically
-                if (i + 1) % 10 == 0 or i == total_conversations - 1:
-                    logger.info(
-                        f"Processed {i + 1}/{total_conversations} conversations"
-                    )
+                    # Update progress counter
+                    completed += 1
+
+                    # Call progress callback if provided
+                    if progress_callback:
+                        progress_callback(completed, total_conversations)
+                    # Or log progress periodically
+                    elif completed % 10 == 0 or completed == total_conversations:
+                        logger.info(
+                            f"Processed {completed}/{total_conversations} conversations"
+                        )
+                except Exception as e:
+                    logger.error(f"Error getting future result: {str(e)}")
+                    completed += 1
+                    if progress_callback:
+                        progress_callback(completed, total_conversations)
 
         # Save results to CSV
+        logger.info("Saving evaluation results to CSV...")
         df = pd.DataFrame(all_results)
         df.to_csv(output_path, index=False)
         logger.info(f"Results saved to {output_path}")
