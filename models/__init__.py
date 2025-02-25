@@ -1,3 +1,3 @@
-from models.data_models import Persona, Conversation
+from models.data_models import Persona, Conversation, Grade, Behavior
 
-__all__ = ["Persona", "Conversation"]
+__all__ = ["Persona", "Conversation", "Grade", "Behavior"]
